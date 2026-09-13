@@ -1,9 +1,11 @@
-from pathlib import Path
+import os
 import sqlite3
+from pathlib import Path
+
 from flask import Flask, jsonify, render_template, request
 
 BASE_DIR = Path(__file__).resolve().parent
-DB_PATH = BASE_DIR / "logistics.db"
+DB_PATH = Path(os.getenv("LOGISTICS_DB", BASE_DIR / "logistics.db"))
 
 app = Flask(__name__)
 
@@ -30,6 +32,20 @@ def init_db():
             )
             """
         )
+        conn.commit()
+
+
+def delivery_to_dict(row):
+    return dict(row)
+
+
+def status_counts(conn):
+    counts = {"total": conn.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0]}
+    for status in VALID_STATUSES:
+        counts[status] = conn.execute(
+            "SELECT COUNT(*) FROM deliveries WHERE status = ?", (status,)
+        ).fetchone()[0]
+    return counts
 
 
 @app.get("/")
@@ -42,16 +58,11 @@ def dashboard():
             ).fetchall()
         else:
             rows = conn.execute("SELECT * FROM deliveries ORDER BY id DESC").fetchall()
+        counts = status_counts(conn)
 
-        counts = {
-            "total": conn.execute("SELECT COUNT(*) FROM deliveries").fetchone()[0],
-            "planned": conn.execute("SELECT COUNT(*) FROM deliveries WHERE status='planned'").fetchone()[0],
-            "in_transit": conn.execute("SELECT COUNT(*) FROM deliveries WHERE status='in_transit'").fetchone()[0],
-            "delivered": conn.execute("SELECT COUNT(*) FROM deliveries WHERE status='delivered'").fetchone()[0],
-            "delayed": conn.execute("SELECT COUNT(*) FROM deliveries WHERE status='delayed'").fetchone()[0],
-        }
-
-    return render_template("dashboard.html", deliveries=rows, counts=counts, active_status=status)
+    return render_template(
+        "dashboard.html", deliveries=rows, counts=counts, active_status=status
+    )
 
 
 @app.get("/health")
@@ -59,14 +70,47 @@ def health():
     return jsonify({"status": "ok", "service": "logistics-dashboard"})
 
 
+@app.get("/api/summary")
+def summary():
+    with get_db() as conn:
+        return jsonify(status_counts(conn))
+
+
 @app.route("/api/deliveries", methods=["GET", "POST"])
 def deliveries_api():
     if request.method == "GET":
-        with get_db() as conn:
-            rows = conn.execute("SELECT * FROM deliveries ORDER BY id DESC").fetchall()
-        return jsonify([dict(row) for row in rows])
+        status = request.args.get("status", "").strip()
+        driver = request.args.get("driver", "").strip()
+        search = request.args.get("q", "").strip()
 
-    data = request.get_json(silent=True) or {}
+        sql = "SELECT * FROM deliveries"
+        where = []
+        params = []
+
+        if status:
+            if status not in VALID_STATUSES:
+                return jsonify({"error": "invalid status"}), 400
+            where.append("status = ?")
+            params.append(status)
+        if driver:
+            where.append("driver LIKE ?")
+            params.append(f"%{driver}%")
+        if search:
+            where.append("(customer LIKE ? OR destination LIKE ? OR driver LIKE ?)")
+            term = f"%{search}%"
+            params.extend([term, term, term])
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY id DESC"
+
+        with get_db() as conn:
+            rows = conn.execute(sql, params).fetchall()
+        return jsonify([delivery_to_dict(row) for row in rows])
+
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "JSON body is required"}), 400
+
     customer = str(data.get("customer", "")).strip()
     destination = str(data.get("destination", "")).strip()
     driver = str(data.get("driver", "")).strip()
@@ -82,37 +126,67 @@ def deliveries_api():
             "INSERT INTO deliveries(customer, destination, driver, status) VALUES (?, ?, ?, ?)",
             (customer, destination, driver, status),
         )
+        conn.commit()
         row = conn.execute(
             "SELECT * FROM deliveries WHERE id = ?", (cursor.lastrowid,)
         ).fetchone()
 
-    return jsonify(dict(row)), 201
+    return jsonify(delivery_to_dict(row)), 201
+
+
+@app.get("/api/deliveries/<int:delivery_id>")
+def get_delivery(delivery_id):
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM deliveries WHERE id = ?", (delivery_id,)
+        ).fetchone()
+    if row is None:
+        return jsonify({"error": "delivery not found"}), 404
+    return jsonify(delivery_to_dict(row))
 
 
 @app.patch("/api/deliveries/<int:delivery_id>")
 def update_delivery(delivery_id):
-    data = request.get_json(silent=True) or {}
-    status = str(data.get("status", "")).strip()
-    if status not in VALID_STATUSES:
-        return jsonify({"error": "invalid status"}), 400
+    data = request.get_json(silent=True)
+    if not isinstance(data, dict):
+        return jsonify({"error": "JSON body is required"}), 400
+
+    allowed_fields = {"status", "driver"}
+    if not any(field in data for field in allowed_fields):
+        return jsonify({"error": "status or driver is required"}), 400
 
     with get_db() as conn:
         existing = conn.execute(
-            "SELECT id FROM deliveries WHERE id = ?", (delivery_id,)
+            "SELECT * FROM deliveries WHERE id = ?", (delivery_id,)
         ).fetchone()
         if not existing:
             return jsonify({"error": "delivery not found"}), 404
 
+        status = str(data.get("status", existing["status"])).strip()
+        driver = str(data.get("driver", existing["driver"])).strip()
+
+        if status not in VALID_STATUSES:
+            return jsonify({"error": "invalid status"}), 400
+
         conn.execute(
-            "UPDATE deliveries SET status = ? WHERE id = ?", (status, delivery_id)
+            "UPDATE deliveries SET status = ?, driver = ? WHERE id = ?",
+            (status, driver, delivery_id),
         )
+        conn.commit()
         row = conn.execute(
             "SELECT * FROM deliveries WHERE id = ?", (delivery_id,)
         ).fetchone()
 
-    return jsonify(dict(row))
+    return jsonify(delivery_to_dict(row))
+
+
+with app.app_context():
+    init_db()
 
 
 if __name__ == "__main__":
-    init_db()
-    app.run(debug=True, port=5001)
+    app.run(
+        host="0.0.0.0",
+        port=int(os.getenv("PORT", "5001")),
+        debug=os.getenv("FLASK_DEBUG", "0") == "1",
+    )
