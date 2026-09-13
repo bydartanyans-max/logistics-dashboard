@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Logistics Dashboard</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+  <main class="container">
+    <header class="hero">
+      <div>
+        <p class="eyebrow">OPERATIONS CONTROL</p>
+        <h1>Logistics Dashboard</h1>
+        <p class="muted">Manage deliveries, drivers and shipment status from one place.</p>
+      </div>
+      <span class="live">● API Online</span>
+    </header>
+
+    <section class="stats">
+      <article><span>Total</span><strong>{{ counts.total }}</strong></article>
+      <article><span>Planned</span><strong>{{ counts.planned }}</strong></article>
+      <article><span>In Transit</span><strong>{{ counts.in_transit }}</strong></article>
+      <article><span>Delivered</span><strong>{{ counts.delivered }}</strong></article>
+      <article><span>Delayed</span><strong>{{ counts.delayed }}</strong></article>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head"><h2>Create delivery</h2><span>REST + SQLite</span></div>
+      <form id="delivery-form" class="form-grid">
+        <input id="customer" placeholder="Customer" required>
+        <input id="destination" placeholder="Destination" required>
+        <input id="driver" placeholder="Driver (optional)">
+        <button type="submit">Add delivery</button>
+      </form>
+      <p id="message" class="message"></p>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Deliveries</h2>
+        <nav class="filters">
+          {% for value, label in [('all','All'),('planned','Planned'),('in_transit','In transit'),('delivered','Delivered'),('delayed','Delayed')] %}
+            <a class="{{ 'active' if active_status == value else '' }}" href="/?status={{ value }}">{{ label }}</a>
+          {% endfor %}
+        </nav>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>ID</th><th>Customer</th><th>Destination</th><th>Driver</th><th>Status</th><th>Created</th></tr></thead>
+          <tbody>
+          {% for row in deliveries %}
+            <tr>
+              <td>#{{ row.id }}</td>
+              <td>{{ row.customer }}</td>
+              <td>{{ row.destination }}</td>
+              <td>{{ row.driver or '—' }}</td>
+              <td>
+                <select class="status-select" data-id="{{ row.id }}">
+                  {% for value, label in [('planned','Planned'),('in_transit','In Transit'),('delivered','Delivered'),('delayed','Delayed')] %}
+                    <option value="{{ value }}" {{ 'selected' if row.status == value else '' }}>{{ label }}</option>
+                  {% endfor %}
+                </select>
+              </td>
+              <td>{{ row.created_at }}</td>
+            </tr>
+          {% else %}
+            <tr><td colspan="6" class="empty">No deliveries yet. Create the first one above.</td></tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+<script>
+const form = document.getElementById('delivery-form');
+const message = document.getElementById('message');
+form.addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const payload = {
+    customer: document.getElementById('customer').value,
+    destination: document.getElementById('destination').value,
+    driver: document.getElementById('driver').value
+  };
+  const response = await fetch('/api/deliveries', {
+    method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(payload)
+  });
+  if (response.ok) location.reload();
+  else message.textContent = (await response.json()).error || 'Could not create delivery.';
+});
+
+document.querySelectorAll('.status-select').forEach((select) => {
+  select.addEventListener('change', async () => {
+    const response = await fetch(`/api/deliveries/${select.dataset.id}`, {
+      method: 'PATCH', headers: {'Content-Type':'application/json'}, body: JSON.stringify({status: select.value})
+    });
+    if (response.ok) location.reload();
+    else alert('Could not update delivery status.');
+  });
+});
+</script>
+</body>
+</html>
